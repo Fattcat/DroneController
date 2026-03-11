@@ -1,0 +1,846 @@
+<!DOCTYPE html>
+<html lang="sk">
+<head>
+<meta charset="UTF-8">
+<title>🚁 FPV Drone Simulator</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&display=swap');
+
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#000; overflow:hidden; font-family:'Share Tech Mono', monospace; }
+  #gameCanvas { display:block; position:fixed; top:0; left:0; }
+
+  /* ── HUD ───────────────────────────────────────────────── */
+  #hud {
+    position:fixed; inset:0; pointer-events:none; z-index:10;
+  }
+
+  /* Score / Distance */
+  .hud-panel {
+    position:fixed; background:rgba(0,0,0,0.45);
+    border:1px solid rgba(0,255,150,0.3);
+    border-radius:4px; padding:8px 14px;
+    backdrop-filter:blur(4px);
+  }
+  #panel-tl { top:16px; left:16px; }
+  #panel-tr { top:16px; right:16px; text-align:right; }
+  #panel-bc {
+    bottom:20px; left:50%; transform:translateX(-50%);
+    text-align:center; min-width:300px;
+  }
+
+  .hud-label { color:rgba(0,255,150,0.6); font-size:10px; letter-spacing:2px; text-transform:uppercase; }
+  .hud-value { color:#00ff96; font-size:22px; font-family:'Orbitron', monospace; font-weight:700; line-height:1.1; }
+  .hud-value.yellow { color:#ffd700; }
+  .hud-value.red { color:#ff4455; }
+  .hud-value.small { font-size:14px; }
+
+  /* Crosshair */
+  #crosshair {
+    position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+    width:28px; height:28px;
+  }
+  #crosshair::before, #crosshair::after {
+    content:''; position:absolute; background:rgba(255,255,255,0.6);
+  }
+  #crosshair::before { width:2px; height:100%; left:13px; }
+  #crosshair::after  { width:100%; height:2px; top:13px; }
+  #crosshair .dot {
+    position:absolute; width:4px; height:4px; background:rgba(255,255,255,0.8);
+    border-radius:50%; top:12px; left:12px;
+  }
+
+  /* FPV prop corners */
+  .prop { position:fixed; width:55px; height:55px; }
+  .prop svg { width:100%; height:100%; }
+  #p-tl { top:10px; left:10px; }
+  #p-tr { top:10px; right:10px; transform:scaleX(-1); }
+  #p-bl { bottom:10px; left:10px; transform:scaleY(-1); }
+  #p-br { bottom:10px; right:10px; transform:scale(-1,-1); }
+
+  /* Horizon / Altitude vertical bar */
+  .vert-bar {
+    position:fixed; top:50%; transform:translateY(-50%);
+    width:6px; height:120px; background:rgba(255,255,255,0.08);
+    border-radius:3px; border:1px solid rgba(255,255,255,0.12);
+  }
+  #bar-alt { left:14px; }
+  #bar-spd { right:14px; }
+  .bar-needle {
+    position:absolute; left:0; width:6px; height:12px;
+    border-radius:3px; transition:top 0.08s linear;
+  }
+  #needle-alt { background:#00ff96; box-shadow:0 0 8px #00ff96; }
+  #needle-spd { background:#00aaff; box-shadow:0 0 8px #00aaff; }
+  .bar-label {
+    position:absolute; font-size:8px; color:rgba(255,255,255,0.4);
+    letter-spacing:1px; white-space:nowrap;
+  }
+  #bar-alt .bar-label { bottom:-16px; left:-4px; }
+  #bar-spd .bar-label { bottom:-16px; right:-2px; }
+
+  /* Warning flash */
+  #warning {
+    position:fixed; top:50%; left:50%; transform:translate(-50%,-80px);
+    color:#ff3344; font-size:18px; font-family:'Orbitron',monospace;
+    font-weight:700; letter-spacing:4px; text-shadow:0 0 20px #ff0000;
+    opacity:0; transition:opacity 0.1s; pointer-events:none;
+  }
+  #warning.show { opacity:1; animation:warn-flash 0.4s infinite; }
+  @keyframes warn-flash { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+  /* Speed lines (VFX overlay) */
+  #speedlines {
+    position:fixed; inset:0; pointer-events:none; opacity:0;
+    background:radial-gradient(ellipse at center, transparent 60%, rgba(100,180,255,0.08) 100%);
+    transition:opacity 0.2s;
+  }
+
+  /* Connection indicator */
+  #conn {
+    position:fixed; bottom:10px; right:10px;
+    font-size:10px; letter-spacing:1px; color:rgba(255,80,80,0.7);
+    transition:color 0.3s;
+  }
+  #conn.ok { color:rgba(0,255,150,0.8); }
+
+  /* ── START SCREEN ──────────────────────────────────────── */
+  #screen-start {
+    position:fixed; inset:0; z-index:100;
+    background:radial-gradient(ellipse at 50% 30%, rgba(0,30,60,0.98) 0%, #000 100%);
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:0;
+  }
+  #screen-start h1 {
+    font-family:'Orbitron',monospace; font-size:clamp(32px,6vw,68px);
+    font-weight:900; color:#00ff96;
+    text-shadow:0 0 40px #00ff96, 0 0 80px rgba(0,255,150,0.3);
+    letter-spacing:6px; margin-bottom:4px;
+  }
+  #screen-start .tagline {
+    color:rgba(0,200,120,0.6); font-size:14px; letter-spacing:4px;
+    margin-bottom:36px;
+  }
+  .ctrl-grid {
+    display:grid; grid-template-columns:1fr 1fr; gap:14px;
+    margin-bottom:32px; max-width:600px; width:90%;
+  }
+  .ctrl-card {
+    background:rgba(0,255,150,0.04); border:1px solid rgba(0,255,150,0.15);
+    border-radius:8px; padding:14px 18px;
+  }
+  .ctrl-card h3 {
+    font-family:'Orbitron',monospace; font-size:11px;
+    color:#00ff96; letter-spacing:3px; margin-bottom:10px;
+  }
+  .ctrl-card p {
+    font-size:11px; color:rgba(200,220,210,0.7); margin:4px 0;
+    display:flex; justify-content:space-between; gap:8px;
+  }
+  .ctrl-card p span { color:rgba(0,200,255,0.8); font-size:10px; }
+  .btn-start {
+    font-family:'Orbitron',monospace; font-size:16px; font-weight:700;
+    letter-spacing:4px; padding:14px 48px;
+    background:transparent; color:#00ff96;
+    border:2px solid #00ff96; border-radius:4px; cursor:pointer;
+    text-transform:uppercase; position:relative; overflow:hidden;
+    transition:all 0.2s; pointer-events:all;
+  }
+  .btn-start::before {
+    content:''; position:absolute; inset:0;
+    background:#00ff96; transform:translateX(-101%); transition:transform 0.2s;
+  }
+  .btn-start:hover::before { transform:translateX(0); }
+  .btn-start:hover { color:#000; }
+  .btn-start span { position:relative; z-index:1; }
+
+  /* ── GAME OVER SCREEN ───────────────────────────────────── */
+  #screen-over {
+    position:fixed; inset:0; z-index:100;
+    background:rgba(0,0,0,0.88);
+    display:none; flex-direction:column; align-items:center; justify-content:center;
+    backdrop-filter:blur(6px);
+  }
+  #screen-over.show { display:flex; }
+  #over-title {
+    font-family:'Orbitron',monospace; font-size:clamp(40px,8vw,80px);
+    font-weight:900; margin-bottom:8px;
+    animation:title-in 0.4s ease-out;
+  }
+  @keyframes title-in { from{transform:scale(1.4);opacity:0} to{transform:scale(1);opacity:1} }
+  #over-title.crash { color:#ff4455; text-shadow:0 0 40px #ff0000; }
+  #over-title.win   { color:#ffd700; text-shadow:0 0 40px #ffa000; }
+  #over-score {
+    font-family:'Orbitron',monospace; font-size:clamp(22px,4vw,36px);
+    color:#ffd700; margin-bottom:6px;
+  }
+  #over-stats {
+    font-size:13px; color:rgba(200,200,200,0.6);
+    margin-bottom:32px; text-align:center; line-height:1.8;
+  }
+
+  /* ── MINI MAP ───────────────────────────────────────────── */
+  #minimap {
+    position:fixed; bottom:20px; right:10px;
+    width:100px; height:180px;
+    background:rgba(0,0,0,0.5); border:1px solid rgba(0,255,150,0.2);
+    border-radius:4px; overflow:hidden;
+  }
+  #minimap canvas { width:100%; height:100%; }
+  #minimap-label {
+    position:absolute; bottom:4px; left:50%; transform:translateX(-50%);
+    font-size:8px; color:rgba(0,255,150,0.4); letter-spacing:2px;
+  }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════
+     START SCREEN
+════════════════════════════════════════════════════════ -->
+<div id="screen-start">
+  <h1>⬡ FPV DRONE SIM</h1>
+  <p class="tagline">PRELETI PREKÁŽKOVÚ DRÁHU</p>
+  <div class="ctrl-grid">
+    <div class="ctrl-card">
+      <h3>⌨ KLÁVESNICA</h3>
+      <p>Dopredu / Dozadu <span>W / S</span></p>
+      <p>Yaw (otáčanie) <span>A / D</span></p>
+      <p>Strafe vľavo/vpravo <span>Q / E</span></p>
+      <p>Výška hore / dole <span>SPC / SHIFT</span></p>
+      <p>Rýchlosť + / − <span>↑ / ↓</span></p>
+      <p>Brzda <span>X</span></p>
+    </div>
+    <div class="ctrl-card">
+      <h3>🎮 ARDUINO OVLÁDAČ</h3>
+      <p>Ľavý X <span>Yaw</span></p>
+      <p>Ľavý Y <span>Throttle (výška)</span></p>
+      <p>Pravý X <span>Strafe (Roll)</span></p>
+      <p>Pravý Y <span>Pitch (dopredu)</span></p>
+      <p>BTN1 / BTN2 <span>Rýchlosť ±</span></p>
+      <p>BTN3 <span>Turbo boost</span></p>
+    </div>
+  </div>
+  <button class="btn-start" onclick="startGame()"><span>▶ ŠTART</span></button>
+</div>
+
+<!-- GAME CANVAS -->
+<canvas id="gameCanvas"></canvas>
+
+<!-- ═══════════════════════════════════════════════════════
+     HUD
+════════════════════════════════════════════════════════ -->
+<div id="hud">
+  <!-- Top Left: Score -->
+  <div class="hud-panel" id="panel-tl">
+    <div class="hud-label">SKÓRE</div>
+    <div class="hud-value" id="hud-score">0</div>
+    <div class="hud-label" style="margin-top:6px">TYČE</div>
+    <div class="hud-value small yellow" id="hud-poles">0</div>
+  </div>
+
+  <!-- Top Right: Distance / Time -->
+  <div class="hud-panel" id="panel-tr">
+    <div class="hud-label">VZDIALENOSŤ</div>
+    <div class="hud-value" id="hud-dist">0 m</div>
+    <div class="hud-label" style="margin-top:6px">ČAS</div>
+    <div class="hud-value small" id="hud-time">0.0 s</div>
+  </div>
+
+  <!-- Bottom Center: Speed / Altitude -->
+  <div class="hud-panel" id="panel-bc">
+    <span class="hud-label">SPD</span>&nbsp;
+    <span class="hud-value small" id="hud-spd">0</span>
+    &nbsp;&nbsp;&nbsp;
+    <span class="hud-label">ALT</span>&nbsp;
+    <span class="hud-value small" id="hud-alt">0.0 m</span>
+    &nbsp;&nbsp;&nbsp;
+    <span class="hud-label">KURZ</span>&nbsp;
+    <span class="hud-value small yellow" id="hud-yaw">0°</span>
+  </div>
+
+  <!-- Crosshair -->
+  <div id="crosshair"><div class="dot"></div></div>
+
+  <!-- FPV prop corners SVG -->
+  <div class="prop" id="p-tl">
+    <svg viewBox="0 0 55 55" fill="none">
+      <circle cx="10" cy="10" r="8" stroke="rgba(100,200,255,0.25)" stroke-width="2"/>
+      <path d="M18 4 C28 2 50 2 52 10" stroke="rgba(100,200,255,0.18)" stroke-width="1.5" fill="none"/>
+      <path d="M4 18 C2 28 2 50 10 52" stroke="rgba(100,200,255,0.18)" stroke-width="1.5" fill="none"/>
+    </svg>
+  </div>
+  <div class="prop" id="p-tr">
+    <svg viewBox="0 0 55 55" fill="none">
+      <circle cx="10" cy="10" r="8" stroke="rgba(100,200,255,0.25)" stroke-width="2"/>
+      <path d="M18 4 C28 2 50 2 52 10" stroke="rgba(100,200,255,0.18)" stroke-width="1.5" fill="none"/>
+      <path d="M4 18 C2 28 2 50 10 52" stroke="rgba(100,200,255,0.18)" stroke-width="1.5" fill="none"/>
+    </svg>
+  </div>
+  <div class="prop" id="p-bl">
+    <svg viewBox="0 0 55 55" fill="none">
+      <circle cx="10" cy="10" r="8" stroke="rgba(100,200,255,0.25)" stroke-width="2"/>
+      <path d="M18 4 C28 2 50 2 52 10" stroke="rgba(100,200,255,0.18)" stroke-width="1.5" fill="none"/>
+      <path d="M4 18 C2 28 2 50 10 52" stroke="rgba(100,200,255,0.18)" stroke-width="1.5" fill="none"/>
+    </svg>
+  </div>
+  <div class="prop" id="p-br">
+    <svg viewBox="0 0 55 55" fill="none">
+      <circle cx="10" cy="10" r="8" stroke="rgba(100,200,255,0.25)" stroke-width="2"/>
+      <path d="M18 4 C28 2 50 2 52 10" stroke="rgba(100,200,255,0.18)" stroke-width="1.5" fill="none"/>
+      <path d="M4 18 C2 28 2 50 10 52" stroke="rgba(100,200,255,0.18)" stroke-width="1.5" fill="none"/>
+    </svg>
+  </div>
+
+  <!-- Altitude bar -->
+  <div class="vert-bar" id="bar-alt">
+    <div class="bar-needle" id="needle-alt"></div>
+    <div class="bar-label">ALT</div>
+  </div>
+  <!-- Speed bar -->
+  <div class="vert-bar" id="bar-spd">
+    <div class="bar-needle" id="needle-spd"></div>
+    <div class="bar-label">SPD</div>
+  </div>
+
+  <!-- Warning -->
+  <div id="warning">⚠ POZOR — PREKÁŽKA</div>
+
+  <!-- Speed lines VFX -->
+  <div id="speedlines"></div>
+
+  <!-- Connection status -->
+  <div id="conn">⬤ BEZ ARDUINO</div>
+
+  <!-- Mini-map -->
+  <div id="minimap">
+    <canvas id="minimap-canvas" width="100" height="180"></canvas>
+    <div id="minimap-label">MAPA</div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════
+     GAME OVER
+════════════════════════════════════════════════════════ -->
+<div id="screen-over">
+  <div id="over-title" class="crash">💥 CRASH!</div>
+  <div id="over-score">SKÓRE: <span id="final-score">0</span></div>
+  <div id="over-stats"></div>
+  <button class="btn-start" onclick="restartGame()"><span>↺ HRAŤ ZNOVA</span></button>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════
+     SCRIPTS
+════════════════════════════════════════════════════════ -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.4/socket.io.min.js"></script>
+<script>
+"use strict";
+// ══════════════════════════════════════════════════════════════
+//  FPV DRONE SIMULATOR  –  Main Game Logic
+// ══════════════════════════════════════════════════════════════
+
+// ── Three.js init ────────────────────────────────────────────
+const canvas   = document.getElementById('gameCanvas');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias:true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type    = THREE.PCFSoftShadowMap;
+renderer.toneMapping       = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+
+const scene  = new THREE.Scene();
+scene.background = new THREE.Color(0x87ceeb);
+scene.fog = new THREE.FogExp2(0x9ad4e8, 0.008);
+
+const camera = new THREE.PerspectiveCamera(85, 1, 0.1, 250);
+
+function onResize() {
+  const W = window.innerWidth, H = window.innerHeight;
+  renderer.setSize(W, H);
+  camera.aspect = W / H;
+  camera.updateProjectionMatrix();
+}
+onResize();
+window.addEventListener('resize', onResize);
+
+// ── Lighting ─────────────────────────────────────────────────
+scene.add(new THREE.AmbientLight(0xffeedd, 0.65));
+
+const sun = new THREE.DirectionalLight(0xfffaf0, 1.2);
+sun.position.set(60, 120, 80);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left:-120,right:120,top:120,bottom:-120,near:1,far:600 });
+scene.add(sun);
+
+const hemi = new THREE.HemisphereLight(0x87ceeb, 0x3a7d44, 0.5);
+scene.add(hemi);
+
+// ── Ground ───────────────────────────────────────────────────
+const COURSE_LEN = 450;
+const groundGeo  = new THREE.PlaneGeometry(120, COURSE_LEN + 100, 20, 80);
+const groundMat  = new THREE.MeshLambertMaterial({ color:0x3a7d44 });
+const ground     = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI / 2;
+ground.position.set(0, 0, COURSE_LEN / 2 - 30);
+ground.receiveShadow = true;
+scene.add(ground);
+
+// Grid
+const grid = new THREE.GridHelper(COURSE_LEN + 100, 90, 0x2a6a34, 0x2a6a34);
+grid.position.set(0, 0.05, COURSE_LEN / 2 - 30);
+scene.add(grid);
+
+// ── Sky dome ─────────────────────────────────────────────────
+const skyDome = new THREE.Mesh(
+  new THREE.SphereGeometry(230, 16, 16),
+  new THREE.MeshBasicMaterial({ color:0x87ceeb, side:THREE.BackSide })
+);
+scene.add(skyDome);
+
+// ── Clouds ───────────────────────────────────────────────────
+function makeCloud(x, y, z) {
+  const g = new THREE.Group();
+  const m = new THREE.MeshLambertMaterial({ color:0xffffff, transparent:true, opacity:0.88 });
+  [[0,0,0,2.8],[-2.2,0,0,2],[ 2.2,0,0,2],[0,0,-1.8,2],[0,1.2,0,1.6]].forEach(([cx,cy,cz,r])=>{
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(r,7,7), m);
+    mesh.position.set(cx, cy, cz);
+    g.add(mesh);
+  });
+  g.position.set(x, y, z);
+  return g;
+}
+for (let i=0; i<24; i++) {
+  scene.add(makeCloud(
+    (Math.random()-0.5)*80,
+    18 + Math.random()*16,
+    i * (COURSE_LEN/24) - 20
+  ));
+}
+
+// ── Course: Poles ────────────────────────────────────────────
+const POLES       = [];
+const NUM_POLES   = 45;
+const CORR_HALF_W = 22; // half-corridor width (±X)
+
+function buildCourse() {
+  POLES.forEach(p => {
+    scene.remove(p.bodyMesh);
+    scene.remove(p.capMesh);
+  });
+  POLES.length = 0;
+
+  // Seeded random-ish layout — guarantees some navigable gaps
+  for (let i = 0; i < NUM_POLES; i++) {
+    // Distribute along course, with clusters
+    const baseZ  = 18 + (i / NUM_POLES) * (COURSE_LEN - 30);
+    const z      = baseZ + (Math.random() - 0.5) * 8;
+    // Offset X: bias toward edges, leaving center-ish gaps
+    const side   = Math.random() > 0.5 ? 1 : -1;
+    const xBias  = 4 + Math.random() * (CORR_HALF_W - 4);
+    const x      = side * xBias;
+    const height = 7 + Math.random() * 16;   // 7–23 m tall
+    const radius = 0.55 + Math.random() * 0.9; // 0.55–1.45
+
+    // Visual pole (cylinder)
+    const hue      = Math.random();
+    const bodyMat  = new THREE.MeshLambertMaterial({ color: new THREE.Color().setHSL(hue, 0.6, 0.35) });
+    const bodyMesh = new THREE.Mesh(
+      new THREE.CylinderGeometry(radius, radius*1.25, height, 8),
+      bodyMat
+    );
+    bodyMesh.position.set(x, height/2, z);
+    bodyMesh.castShadow = true;
+    scene.add(bodyMesh);
+
+    // Glowing top sphere
+    const capMat  = new THREE.MeshLambertMaterial({ color: new THREE.Color().setHSL(hue, 1.0, 0.65), emissive: new THREE.Color().setHSL(hue, 1.0, 0.3) });
+    const capMesh = new THREE.Mesh(new THREE.SphereGeometry(radius*1.6, 8, 8), capMat);
+    capMesh.position.set(x, height + radius*1.0, z);
+    scene.add(capMesh);
+
+    POLES.push({ x, z, height, colRadius: radius + 0.9, bodyMesh, capMesh, passed:false });
+  }
+
+  // Start arch (green)
+  buildArch(  0,  0x00ff88, 'START');
+  // Finish arch (gold)
+  buildArch(COURSE_LEN, 0xffd700, 'CIEĽ');
+}
+
+function buildArch(z, color, label) {
+  const mat = new THREE.MeshLambertMaterial({ color, emissive: new THREE.Color(color).multiplyScalar(0.3) });
+  [-9, 9].forEach(sx => {
+    const post = new THREE.Mesh(new THREE.CylinderGeometry(0.35,0.35,14,8), mat);
+    post.position.set(sx, 7, z);
+    scene.add(post);
+  });
+  const bar = new THREE.Mesh(new THREE.BoxGeometry(18.7,0.7,0.7), mat);
+  bar.position.set(0, 14, z);
+  scene.add(bar);
+}
+
+// ── Drone state ───────────────────────────────────────────────
+const drone = {
+  x:0, y:3.5, z:-6,
+  vx:0, vy:0, vz:0,
+  yaw:0, visualPitch:0, visualRoll:0,
+  baseSpeed: 9,
+  alive: true,
+};
+const camSmooth = { x:0, y:3.5, z:-6, yaw:0 };
+
+// ── Controller input ──────────────────────────────────────────
+const ctrl = {
+  pitch:0, yaw:0, roll:0, throttle:0,
+  speedUp:false, speedDown:false, boost:false, brake:false,
+};
+
+// ── Keyboard ──────────────────────────────────────────────────
+const keys = {};
+document.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (['Space','ArrowUp','ArrowDown','KeyX'].includes(e.code)) e.preventDefault();
+});
+document.addEventListener('keyup', e => { keys[e.code] = false; });
+
+function readKeyboard() {
+  ctrl.pitch    = (keys['KeyW']?1:0) - (keys['KeyS']?1:0);
+  ctrl.yaw      = (keys['KeyA']?1:0) - (keys['KeyD']?1:0);
+  ctrl.roll     = (keys['KeyQ']?1:0) - (keys['KeyE']?1:0);
+  ctrl.throttle = (keys['Space']?1:0) - (keys['ShiftLeft']||keys['ShiftRight']?1:0);
+  ctrl.speedUp    = !!keys['ArrowUp'];
+  ctrl.speedDown  = !!keys['ArrowDown'];
+  ctrl.brake      = !!keys['KeyX'];
+  ctrl.boost      = false; // keyboard has no boost (use B3 on controller)
+}
+
+// ── WebSocket (Arduino) ───────────────────────────────────────
+let arduinoOn = false;
+function connectArduino() {
+  try {
+    const socket = io('http://localhost:5000', { timeout:3000, reconnectionDelay:2000 });
+    socket.on('connect', () => {
+      arduinoOn = true;
+      const el = document.getElementById('conn');
+      el.textContent = '⬤ ARDUINO OK';
+      el.className = 'ok';
+    });
+    socket.on('disconnect', () => {
+      arduinoOn = false;
+      document.getElementById('conn').textContent = '⬤ BEZ ARDUINO';
+      document.getElementById('conn').className = '';
+    });
+    socket.on('controller', d => {
+      if (!gameRunning) return;
+      ctrl.yaw      = -mapJoy(d.LX);
+      ctrl.throttle = -mapJoy(d.LY);
+      ctrl.roll     =  mapJoy(d.RX);
+      ctrl.pitch    = -mapJoy(d.RY);
+      ctrl.speedUp    = d.B1 === 1;
+      ctrl.speedDown  = d.B2 === 1;
+      ctrl.boost      = d.B3 === 1;
+      ctrl.brake      = d.B4 === 1;
+    });
+  } catch(_) {}
+}
+
+function mapJoy(v, center=512, dead=45, max=510) {
+  const d = v - center;
+  if (Math.abs(d) < dead) return 0;
+  return Math.max(-1, Math.min(1, (d - Math.sign(d)*dead) / (max - dead)));
+}
+
+// ── Physics constants ─────────────────────────────────────────
+const GRAVITY    = -9.8;
+const LIFT_MAX   =  13;
+const YAW_RATE   =  2.0;  // rad/s
+const DRAG_H     =  0.87; // horizontal drag per frame (@ 60fps)
+const DRAG_V     =  0.89; // vertical drag
+const DRONE_R    =  0.65; // collision sphere radius
+const MAX_ALT    =  45;
+const BOOST_MUL  =  1.65;
+
+// ── Game state ────────────────────────────────────────────────
+let gameRunning  = false;
+let score        = 0;
+let gameTime     = 0;
+let polesPassed  = 0;
+let maxDist      = 0;
+
+function updateDrone(dt) {
+  if (!drone.alive || !gameRunning) return;
+
+  // Keyboard only if no arduino
+  readKeyboard();
+
+  // Speed adjustment
+  if (ctrl.speedUp)   drone.baseSpeed = Math.min(20, drone.baseSpeed + 6*dt);
+  if (ctrl.speedDown) drone.baseSpeed = Math.max(2,  drone.baseSpeed - 6*dt);
+  if (ctrl.brake) {
+    drone.vx *= 0.85; drone.vz *= 0.85;
+  }
+
+  // Effective speed (boost)
+  const spd = drone.baseSpeed * (ctrl.boost ? BOOST_MUL : 1.0);
+
+  // Yaw
+  drone.yaw += ctrl.yaw * YAW_RATE * dt;
+
+  const sinY = Math.sin(drone.yaw);
+  const cosY = Math.cos(drone.yaw);
+
+  // Desired horizontal velocity from pitch+roll
+  const fwdX = sinY * ctrl.pitch,  fwdZ = cosY * ctrl.pitch;
+  const strX = cosY * ctrl.roll,   strZ =-sinY * ctrl.roll;
+  const desVX = (fwdX + strX) * spd;
+  const desVZ = (fwdZ + strZ) * spd;
+
+  // Minimal auto-creep forward (so player must maintain pitch to go fast)
+  const creepX = sinY * 0.5, creepZ = cosY * 0.5;
+
+  const kDrag = 1 - Math.pow(DRAG_H, dt*60);
+  drone.vx += (desVX + creepX - drone.vx) * kDrag;
+  drone.vz += (desVZ + creepZ - drone.vz) * kDrag;
+
+  // Vertical
+  const vertAcc = ctrl.throttle * LIFT_MAX + GRAVITY * 0.75;
+  drone.vy += vertAcc * dt;
+  drone.vy *= Math.pow(DRAG_V, dt*60);
+  drone.vy  = Math.max(-18, Math.min(18, drone.vy));
+
+  // Integrate position
+  drone.x += drone.vx * dt;
+  drone.y += drone.vy * dt;
+  drone.z += drone.vz * dt;
+
+  // Altitude clamps
+  if (drone.y < 0.4) {
+    drone.y  = 0.4;
+    if (drone.vy < -4) { crash("💥 Dotkol si sa zeme!"); return; }
+    drone.vy = Math.max(0, drone.vy);
+  }
+  if (drone.y > MAX_ALT) { drone.y = MAX_ALT; drone.vy = Math.min(0, drone.vy); }
+
+  // Visual tilt
+  drone.visualPitch = THREE.MathUtils.lerp(drone.visualPitch, ctrl.pitch * 0.32, 0.18);
+  drone.visualRoll  = THREE.MathUtils.lerp(drone.visualRoll,  -ctrl.roll  * 0.28 - ctrl.yaw * 0.12, 0.18);
+
+  // Score: distance
+  const dist = Math.max(0, drone.z);
+  if (dist > maxDist) maxDist = dist;
+  gameTime += dt;
+
+  // Pole collision & pass check
+  let warn = false;
+  for (const p of POLES) {
+    const dx = drone.x - p.x, dz = drone.z - p.z;
+    const d2  = Math.sqrt(dx*dx + dz*dz);
+    if (d2 < p.colRadius + DRONE_R && drone.y < p.height + 1.5) {
+      crash("💥 Nabúranie do tyče!"); return;
+    }
+    if (!p.passed && drone.z > p.z + 2) {
+      p.passed = true;
+      polesPassed++;
+      score += 15;  // bonus per pole avoided
+    }
+    if (d2 < p.colRadius + 4 && drone.y < p.height + 3) warn = true;
+  }
+
+  document.getElementById('warning').className = warn ? 'show' : '';
+
+  // Speed lines at high speed
+  const horizSpd = Math.sqrt(drone.vx**2 + drone.vz**2);
+  document.getElementById('speedlines').style.opacity = Math.max(0, (horizSpd - 12) / 8) * 0.6;
+
+  // Distance score
+  score = polesPassed * 15 + Math.floor(maxDist * 0.4) + Math.floor(gameTime * 1.5);
+
+  // Finish line
+  if (drone.z > COURSE_LEN + 5) { winGame(); return; }
+
+  updateHUD(horizSpd);
+}
+
+function updateHUD(horizSpd) {
+  document.getElementById('hud-score').textContent = score;
+  document.getElementById('hud-poles').textContent = polesPassed;
+  document.getElementById('hud-dist').textContent  = Math.floor(maxDist) + ' m';
+  document.getElementById('hud-time').textContent  = gameTime.toFixed(1) + ' s';
+  document.getElementById('hud-spd').textContent   = Math.round(horizSpd);
+  document.getElementById('hud-alt').textContent   = drone.y.toFixed(1) + ' m';
+  document.getElementById('hud-yaw').textContent   = (((-drone.yaw * 180 / Math.PI) % 360 + 360) % 360).toFixed(0) + '°';
+
+  const altN = 1 - Math.max(0,Math.min(1, drone.y / MAX_ALT));
+  const spdN = 1 - Math.max(0,Math.min(1, horizSpd / 20));
+  document.getElementById('needle-alt').style.top = (altN * 104) + 'px';
+  document.getElementById('needle-spd').style.top = (spdN * 104) + 'px';
+}
+
+// ── Camera ────────────────────────────────────────────────────
+function updateCamera() {
+  const lf = 0.12;
+  camSmooth.x   += (drone.x   - camSmooth.x)   * lf;
+  camSmooth.y   += (drone.y   - camSmooth.y)   * lf;
+  camSmooth.z   += (drone.z   - camSmooth.z)   * lf;
+  camSmooth.yaw += (drone.yaw - camSmooth.yaw) * lf * 6;
+
+  camera.position.set(camSmooth.x, camSmooth.y + 0.25, camSmooth.z);
+
+  const lx = camSmooth.x + Math.sin(drone.yaw) * 12;
+  const ly = camSmooth.y + 0.25 + drone.visualPitch * 4;
+  const lz = camSmooth.z + Math.cos(drone.yaw) * 12;
+  camera.lookAt(lx, ly, lz);
+  camera.rotation.z = drone.visualRoll;
+
+  skyDome.position.copy(camera.position);
+}
+
+// ── Mini-map ──────────────────────────────────────────────────
+const mmCanvas = document.getElementById('minimap-canvas');
+const mmCtx    = mmCanvas.getContext('2d');
+const MM_W = 100, MM_H = 180;
+const mmScaleX = MM_W / (CORR_HALF_W * 2);
+const mmScaleZ = MM_H / COURSE_LEN;
+
+function drawMinimap() {
+  mmCtx.clearRect(0, 0, MM_W, MM_H);
+  mmCtx.fillStyle = 'rgba(0,10,0,0.8)';
+  mmCtx.fillRect(0, 0, MM_W, MM_H);
+
+  // Draw poles
+  POLES.forEach(p => {
+    const px = (p.x + CORR_HALF_W) * mmScaleX;
+    const pz = p.z * mmScaleZ;
+    mmCtx.beginPath();
+    mmCtx.arc(px, pz, Math.max(2, p.colRadius * mmScaleX), 0, Math.PI*2);
+    mmCtx.fillStyle = p.passed ? 'rgba(0,255,80,0.25)' : 'rgba(255,80,80,0.55)';
+    mmCtx.fill();
+  });
+
+  // Draw drone
+  const dpx = (drone.x + CORR_HALF_W) * mmScaleX;
+  const dpz = drone.z * mmScaleZ;
+  mmCtx.beginPath();
+  mmCtx.arc(dpx, dpz, 3.5, 0, Math.PI*2);
+  mmCtx.fillStyle = '#00ff96';
+  mmCtx.shadowColor = '#00ff96';
+  mmCtx.shadowBlur = 6;
+  mmCtx.fill();
+  mmCtx.shadowBlur = 0;
+
+  // Heading line
+  mmCtx.beginPath();
+  mmCtx.moveTo(dpx, dpz);
+  mmCtx.lineTo(dpx + Math.sin(drone.yaw)*8, dpz + Math.cos(drone.yaw)*8);
+  mmCtx.strokeStyle = 'rgba(0,255,150,0.7)';
+  mmCtx.lineWidth = 1.5;
+  mmCtx.stroke();
+}
+
+// ── Crash / Win ───────────────────────────────────────────────
+let shakeTimer = 0;
+
+function crash(reason) {
+  drone.alive = gameRunning = false;
+  shakeTimer = 0.5;
+  const finalScore = score;
+
+  document.getElementById('over-title').textContent = '💥 CRASH!';
+  document.getElementById('over-title').className   = 'crash';
+  document.getElementById('final-score').textContent = finalScore;
+  document.getElementById('over-stats').innerHTML =
+    `Vzdialenosť: ${Math.floor(maxDist)} m &nbsp;|&nbsp; Tyče: ${polesPassed}<br>
+     Čas letu: ${gameTime.toFixed(1)} s &nbsp;|&nbsp; ${reason}`;
+
+  setTimeout(() => {
+    document.getElementById('screen-over').classList.add('show');
+  }, 600);
+}
+
+function winGame() {
+  drone.alive = gameRunning = false;
+  const bonus = 500 + polesPassed * 5;
+  const finalScore = score + bonus;
+
+  document.getElementById('over-title').textContent = '🏆 CIEĽ DOSIAHNUTÝ!';
+  document.getElementById('over-title').className   = 'win';
+  document.getElementById('final-score').textContent = finalScore;
+  document.getElementById('over-stats').innerHTML =
+    `Vzdialenosť: ${Math.floor(maxDist)} m &nbsp;|&nbsp; Tyče: ${polesPassed} / ${NUM_POLES}<br>
+     Čas letu: ${gameTime.toFixed(1)} s &nbsp;|&nbsp; Bonusy: +${bonus}`;
+
+  setTimeout(() => {
+    document.getElementById('screen-over').classList.add('show');
+  }, 1000);
+}
+
+// ── Main loop ─────────────────────────────────────────────────
+let lastT = null;
+function loop(ts) {
+  requestAnimationFrame(loop);
+  if (!lastT) lastT = ts;
+  const dt  = Math.min((ts - lastT) / 1000, 0.05);
+  lastT = ts;
+
+  if (gameRunning) {
+    updateDrone(dt);
+    updateCamera();
+    drawMinimap();
+    // Animate prop corners
+    const t = ts * 0.012;
+    ['p-tl','p-tr','p-bl','p-br'].forEach((id, i) => {
+      document.getElementById(id).style.transform =
+        (id==='p-tr'?'scaleX(-1) ':id==='p-bl'?'scaleY(-1) ':id==='p-br'?'scale(-1,-1) ':'') +
+        `rotate(${t * (i%2===0 ? 1:-1) * 360}deg)`;
+    });
+    // Shake on crash
+    if (shakeTimer > 0) {
+      shakeTimer -= dt;
+      camera.position.x += (Math.random()-0.5)*0.4;
+      camera.position.y += (Math.random()-0.5)*0.4;
+    }
+    // Animate cap spheres pulsing
+    const pulse = 0.9 + 0.1*Math.sin(ts*0.004);
+    POLES.forEach(p => {
+      if (p.capMesh) p.capMesh.scale.setScalar(pulse);
+    });
+  }
+  renderer.render(scene, camera);
+}
+
+// ── Start / Restart ───────────────────────────────────────────
+function startGame() {
+  document.getElementById('screen-start').style.display = 'none';
+  document.getElementById('screen-over').classList.remove('show');
+  resetDrone();
+  buildCourse();
+  gameRunning = true;
+}
+
+function restartGame() {
+  document.getElementById('screen-over').classList.remove('show');
+  resetDrone();
+  buildCourse();
+  gameRunning = true;
+}
+
+function resetDrone() {
+  Object.assign(drone, { x:0, y:3.5, z:-6, vx:0, vy:0, vz:0,
+    yaw:0, visualPitch:0, visualRoll:0, baseSpeed:9, alive:true });
+  Object.assign(camSmooth, { x:0, y:3.5, z:-6, yaw:0 });
+  score=0; gameTime=0; polesPassed=0; maxDist=0; shakeTimer=0;
+  camera.position.set(0, 3.5, -6);
+  camera.lookAt(0, 3.5, 10);
+  document.getElementById('warning').className = '';
+  document.getElementById('speedlines').style.opacity = 0;
+}
+
+// ── Init ──────────────────────────────────────────────────────
+connectArduino();
+resetDrone();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
