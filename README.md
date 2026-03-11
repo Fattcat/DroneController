@@ -1,6 +1,3 @@
-# esp32-DroneController
-Drone controller test
-
 # 🚁 FPV Drone Simulator — Arduino + Python + HTML
 
 Kompletný ovládač dronu s Arduino Nano, dvoma KY-023 joystickmi,
@@ -135,7 +132,3 @@ X           → Brzda
     ↓ Serial USB (115200 baud, 50 Hz)
 [server.py — Python]
     ↓ WebSocket (Socket.IO)
-[drone_game.html — Three.js]
-    ↓ FPV render + fyzika + kolízie
-[Prehliadač]
-```
