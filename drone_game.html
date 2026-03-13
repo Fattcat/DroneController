@@ -455,7 +455,7 @@ function buildCourse() {
     capMesh.position.set(x, height + radius*1.0, z);
     scene.add(capMesh);
 
-    POLES.push({ x, z, height, colRadius: radius + 0.9, bodyMesh, capMesh, passed:false });
+    POLES.push({ x, z, height, colRadius: radius + 0.3, bodyMesh, capMesh, passed:false });
   }
 
   buildArch(  0,  0x00ff88, 'START');
@@ -552,7 +552,7 @@ const drone = {
 };
 
 // Kamera — smooth third-person cieľ
-const camSmooth = { x:0, y:5.5, z:-12, yaw:0 };
+const camSmooth = { x:0, y:5.5, z:-12 };
 
 // ── Controller input ──────────────────────────────────────────
 const ctrl = {
@@ -570,8 +570,8 @@ document.addEventListener('keyup', e => { keys[e.code] = false; });
 
 function readKeyboard() {
   ctrl.pitch    = (keys['KeyW']?1:0) - (keys['KeyS']?1:0);
-  ctrl.yaw      = (keys['KeyA']?1:0) - (keys['KeyD']?1:0);
-  ctrl.roll     = (keys['KeyQ']?1:0) - (keys['KeyE']?1:0);
+  ctrl.yaw      = (keys['KeyD']?1:0) - (keys['KeyA']?1:0);  // D=+1=vpravo, A=-1=vľavo
+  ctrl.roll     = (keys['KeyE']?1:0) - (keys['KeyQ']?1:0);
   ctrl.throttle = (keys['Space']?1:0) - (keys['ShiftLeft']||keys['ShiftRight']?1:0);
   ctrl.speedUp    = !!keys['ArrowUp'];
   ctrl.speedDown  = !!keys['ArrowDown'];
@@ -617,10 +617,10 @@ function connectArduino() {
       if (!gameRunning) return;
       // BUG FIX: ctrl sa nastavuje len keď Arduino skutočne posiela dáta.
       // arduinoOn sa nastavuje cez arduino_status event (vyššie).
-      ctrl.yaw      = -mapJoy(d.LX);
-      ctrl.throttle = -mapJoy(d.LY);
-      ctrl.roll     =  mapJoy(d.RX);
-      ctrl.pitch    = -mapJoy(d.RY);
+      ctrl.yaw      =  mapJoy(d.LX);   // +1=vpravo, -1=vľavo
+      ctrl.throttle = -mapJoy(d.LY);   // hore=+1
+      ctrl.roll     =  mapJoy(d.RX);   // +1=strafe vpravo
+      ctrl.pitch    = -mapJoy(d.RY);   // dopredu=+1
       ctrl.speedUp    = d.B1 === 1;
       ctrl.speedDown  = d.B2 === 1;
       ctrl.boost      = d.B3 === 1;
@@ -674,7 +674,7 @@ function updateDrone(dt) {
 
   const spd = drone.baseSpeed * (ctrl.boost ? BOOST_MUL : 1.0);
 
-  drone.yaw -= ctrl.yaw * YAW_RATE * dt;
+  drone.yaw += ctrl.yaw * YAW_RATE * dt;
 
   const sinY = Math.sin(drone.yaw);
   const cosY = Math.cos(drone.yaw);
@@ -706,8 +706,8 @@ function updateDrone(dt) {
   }
   if (drone.y > MAX_ALT) { drone.y = MAX_ALT; drone.vy = Math.min(0, drone.vy); }
 
-  drone.visualPitch = THREE.MathUtils.lerp(drone.visualPitch, ctrl.pitch * 0.32, 0.18);
-  drone.visualRoll  = THREE.MathUtils.lerp(drone.visualRoll,  -ctrl.roll  * 0.28 - ctrl.yaw * 0.12, 0.18);
+  drone.visualPitch = THREE.MathUtils.lerp(drone.visualPitch,  ctrl.pitch * 0.32, 0.18);
+  drone.visualRoll  = THREE.MathUtils.lerp(drone.visualRoll,   ctrl.roll  * 0.28 + ctrl.yaw * 0.12, 0.18);
 
   const dist = Math.max(0, drone.z);
   if (dist > maxDist) maxDist = dist;
@@ -717,7 +717,7 @@ function updateDrone(dt) {
   for (const p of POLES) {
     const dx = drone.x - p.x, dz = drone.z - p.z;
     const d2  = Math.sqrt(dx*dx + dz*dz);
-    if (d2 < p.colRadius + DRONE_R && drone.y < p.height + 1.5) {
+    if (d2 < p.colRadius + DRONE_R && drone.y < p.height + 0.5) {
       crash("💥 Nabúranie do tyče!"); return;
     }
     if (!p.passed && drone.z > p.z + 2) {
@@ -725,7 +725,7 @@ function updateDrone(dt) {
       polesPassed++;
       score += 15;
     }
-    if (d2 < p.colRadius + 4 && drone.y < p.height + 3) warn = true;
+    if (d2 < p.colRadius + 2.0 && drone.y < p.height + 1.5) warn = true;
   }
 
   document.getElementById('warning').className = warn ? 'show' : '';
@@ -779,35 +779,26 @@ function updateDroneMesh(ts) {
 
 // ── Camera (third-person) ─────────────────────────────────────
 function updateCamera() {
-  const lf = 0.10;  // Plynulosť sledovania
+  // Kamera sa nachádza ZA dronom — pozícia vypočítaná priamo z drone.yaw.
+  // Jeden lerp pre pozíciu, žiadny separátny lerp pre yaw (ten spôsoboval
+  // vizuálne "otočenie" keď yaw lerp dobiehal pozičný lerp).
+  const camDist   = 7.0;
+  const camHeight = 2.8;
 
-  // Smooth yaw — kamera si pomaly pootáča za dronom
-  let dyaw = drone.yaw - camSmooth.yaw;
-  // Skrátime uhol na rozsah -π..π aby nevznikali skoky cez 360°
-  while (dyaw >  Math.PI) dyaw -= Math.PI * 2;
-  while (dyaw < -Math.PI) dyaw += Math.PI * 2;
-  camSmooth.yaw += dyaw * lf * 5;
+  const targetX = drone.x - Math.sin(drone.yaw) * camDist;
+  const targetY = drone.y + camHeight;
+  const targetZ = drone.z - Math.cos(drone.yaw) * camDist;
 
-  // Cieľová pozícia kamery: ZA dronom (offset podľa yaw) a NAD ním
-  const camDist  = 7.0;   // vzdialenosť za dronom
-  const camHeight= 2.8;   // výška nad dronom
-  const targetCamX = drone.x - Math.sin(camSmooth.yaw) * camDist;
-  const targetCamY = drone.y + camHeight;
-  const targetCamZ = drone.z - Math.cos(camSmooth.yaw) * camDist;
-
-  camSmooth.x += (targetCamX - camSmooth.x) * lf;
-  camSmooth.y += (targetCamY - camSmooth.y) * lf;
-  camSmooth.z += (targetCamZ - camSmooth.z) * lf;
+  const lf = 0.09;
+  camSmooth.x += (targetX - camSmooth.x) * lf;
+  camSmooth.y += (targetY - camSmooth.y) * lf;
+  camSmooth.z += (targetZ - camSmooth.z) * lf;
 
   camera.position.set(camSmooth.x, camSmooth.y, camSmooth.z);
 
-  // Kamera sa díva na dron (mierne pred neho pre lepší výhľad)
-  const lookX = drone.x + Math.sin(drone.yaw) * 2;
-  const lookY = drone.y + 0.3;
-  const lookZ = drone.z + Math.cos(drone.yaw) * 2;
-  camera.lookAt(lookX, lookY, lookZ);
+  // Pozeráme sa na dron (mierne nad stredom pre lepší výhľad)
+  camera.lookAt(drone.x, drone.y + 0.5, drone.z);
 
-  // BUG FIX: žiadny camera.rotation.z — kamera je vždy "hlavou hore"
   skyDome.position.copy(camera.position);
 }
 
@@ -940,8 +931,7 @@ function restartGame() {
 function resetDrone() {
   Object.assign(drone, { x:0, y:3.5, z:-6, vx:0, vy:0, vz:0,
     yaw:0, visualPitch:0, visualRoll:0, baseSpeed:9, alive:true });
-  // Kamera štartuje ZA dronom
-  Object.assign(camSmooth, { x:0, y:6.3, z:-13, yaw:0 });
+  Object.assign(camSmooth, { x:0, y:6.3, z:-13 });
   score=0; gameTime=0; polesPassed=0; maxDist=0; shakeTimer=0;
   camera.position.set(0, 6.3, -13);
   camera.lookAt(0, 3.5, 0);
