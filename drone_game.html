@@ -674,7 +674,7 @@ function updateDrone(dt) {
 
   const spd = drone.baseSpeed * (ctrl.boost ? BOOST_MUL : 1.0);
 
-  drone.yaw += ctrl.yaw * YAW_RATE * dt;
+  drone.yaw -= ctrl.yaw * YAW_RATE * dt;
 
   const sinY = Math.sin(drone.yaw);
   const cosY = Math.cos(drone.yaw);
@@ -763,7 +763,7 @@ function updateDroneMesh(ts) {
   droneMesh.position.set(drone.x, drone.y, drone.z);
 
   // Yaw — otáčanie okolo Y osi
-  droneMesh.rotation.y = -drone.yaw;
+  droneMesh.rotation.y = drone.yaw;
 
   // Vizuálny náklon (pitch/roll) — aplikuje sa na lokálne osi X/Z
   // Dron sa naklání ale nikdy sa "neprevracia" — max ±35°
