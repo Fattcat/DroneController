@@ -474,6 +474,74 @@ function buildArch(z, color, label) {
   scene.add(bar);
 }
 
+// ── Drone 3D model ────────────────────────────────────────────
+let droneMesh = null;
+let rotorMeshes = [];
+
+function buildDroneMesh() {
+  if (droneMesh) scene.remove(droneMesh);
+  rotorMeshes = [];
+
+  const root = new THREE.Group();
+
+  // Telo — sploštenýbox
+  const bodyMat = new THREE.MeshLambertMaterial({ color: 0x222233 });
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.18, 0.55), bodyMat);
+  root.add(body);
+
+  // Kamera / nos — malý červený blok vpredu
+  const camMat = new THREE.MeshLambertMaterial({ color: 0xff2222 });
+  const camBox = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.10, 0.10), camMat);
+  camBox.position.set(0, 0, 0.30);
+  root.add(camBox);
+
+  // 4 ramená + motory
+  const armMat   = new THREE.MeshLambertMaterial({ color: 0x334455 });
+  const motorMat = new THREE.MeshLambertMaterial({ color: 0x111122 });
+  const propMat  = new THREE.MeshLambertMaterial({
+    color: 0x00ccff, transparent: true, opacity: 0.55
+  });
+
+  // Pozície ramien: predľavý, predpravý, zadľavý, zadpravý
+  const armOffsets = [
+    [-0.7,  0.7], [ 0.7,  0.7],
+    [-0.7, -0.7], [ 0.7, -0.7],
+  ];
+  armOffsets.forEach(([ox, oz]) => {
+    // Rameno
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.06, 0.12), armMat);
+    arm.position.set(ox * 0.55, 0, oz * 0.55);
+    root.add(arm);
+
+    // Motor
+    const motor = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.10, 0.10, 0.10, 8), motorMat
+    );
+    motor.position.set(ox * 0.85, 0.06, oz * 0.85);
+    root.add(motor);
+
+    // Vrtule (2 lopatky = sploštenýbox)
+    const rotor = new THREE.Mesh(
+      new THREE.BoxGeometry(0.70, 0.025, 0.12), propMat
+    );
+    rotor.position.set(ox * 0.85, 0.12, oz * 0.85);
+    root.add(rotor);
+    rotorMeshes.push(rotor);
+  });
+
+  // LED svetielka — zelená vpredu, červená vzadu
+  const ledF = new THREE.PointLight(0x00ff88, 0.6, 2.5);
+  ledF.position.set(0, 0.1, 0.6);
+  root.add(ledF);
+  const ledB = new THREE.PointLight(0xff2200, 0.5, 2.5);
+  ledB.position.set(0, 0.1, -0.6);
+  root.add(ledB);
+
+  root.castShadow = true;
+  scene.add(root);
+  droneMesh = root;
+}
+
 // ── Drone state ───────────────────────────────────────────────
 const drone = {
   x:0, y:3.5, z:-6,
@@ -482,7 +550,9 @@ const drone = {
   baseSpeed: 9,
   alive: true,
 };
-const camSmooth = { x:0, y:3.5, z:-6, yaw:0 };
+
+// Kamera — smooth third-person cieľ
+const camSmooth = { x:0, y:5.5, z:-12, yaw:0 };
 
 // ── Controller input ──────────────────────────────────────────
 const ctrl = {
@@ -685,22 +755,59 @@ function updateHUD(horizSpd) {
   document.getElementById('needle-spd').style.top = (spdN * 104) + 'px';
 }
 
-// ── Camera ────────────────────────────────────────────────────
+// ── Drone mesh update ─────────────────────────────────────────
+function updateDroneMesh(ts) {
+  if (!droneMesh) return;
+
+  // Pozícia — dron je vždy vzpriamený (os Y hore)
+  droneMesh.position.set(drone.x, drone.y, drone.z);
+
+  // Yaw — otáčanie okolo Y osi
+  droneMesh.rotation.y = -drone.yaw;
+
+  // Vizuálny náklon (pitch/roll) — aplikuje sa na lokálne osi X/Z
+  // Dron sa naklání ale nikdy sa "neprevracia" — max ±35°
+  droneMesh.rotation.x = THREE.MathUtils.clamp(drone.visualPitch * 1.1, -0.6, 0.6);
+  droneMesh.rotation.z = THREE.MathUtils.clamp(drone.visualRoll  * 1.1, -0.6, 0.6);
+
+  // Točenie vrtúľ
+  const propSpeed = 0.18 + Math.abs(drone.vy) * 0.02;
+  rotorMeshes.forEach((r, i) => {
+    r.rotation.y += propSpeed * (i % 2 === 0 ? 1 : -1);
+  });
+}
+
+// ── Camera (third-person) ─────────────────────────────────────
 function updateCamera() {
-  const lf = 0.12;
-  camSmooth.x   += (drone.x   - camSmooth.x)   * lf;
-  camSmooth.y   += (drone.y   - camSmooth.y)   * lf;
-  camSmooth.z   += (drone.z   - camSmooth.z)   * lf;
-  camSmooth.yaw += (drone.yaw - camSmooth.yaw) * lf * 6;
+  const lf = 0.10;  // Plynulosť sledovania
 
-  camera.position.set(camSmooth.x, camSmooth.y + 0.25, camSmooth.z);
+  // Smooth yaw — kamera si pomaly pootáča za dronom
+  let dyaw = drone.yaw - camSmooth.yaw;
+  // Skrátime uhol na rozsah -π..π aby nevznikali skoky cez 360°
+  while (dyaw >  Math.PI) dyaw -= Math.PI * 2;
+  while (dyaw < -Math.PI) dyaw += Math.PI * 2;
+  camSmooth.yaw += dyaw * lf * 5;
 
-  const lx = camSmooth.x + Math.sin(drone.yaw) * 12;
-  const ly = camSmooth.y + 0.25 + drone.visualPitch * 4;
-  const lz = camSmooth.z + Math.cos(drone.yaw) * 12;
-  camera.lookAt(lx, ly, lz);
-  camera.rotation.z = drone.visualRoll;
+  // Cieľová pozícia kamery: ZA dronom (offset podľa yaw) a NAD ním
+  const camDist  = 7.0;   // vzdialenosť za dronom
+  const camHeight= 2.8;   // výška nad dronom
+  const targetCamX = drone.x - Math.sin(camSmooth.yaw) * camDist;
+  const targetCamY = drone.y + camHeight;
+  const targetCamZ = drone.z - Math.cos(camSmooth.yaw) * camDist;
 
+  camSmooth.x += (targetCamX - camSmooth.x) * lf;
+  camSmooth.y += (targetCamY - camSmooth.y) * lf;
+  camSmooth.z += (targetCamZ - camSmooth.z) * lf;
+
+  camera.position.set(camSmooth.x, camSmooth.y, camSmooth.z);
+
+  // Kamera sa díva na dron (mierne pred neho pre lepší výhľad)
+  const lookX = drone.x + Math.sin(drone.yaw) * 2;
+  const lookY = drone.y + 0.3;
+  const lookZ = drone.z + Math.cos(drone.yaw) * 2;
+  camera.lookAt(lookX, lookY, lookZ);
+
+  // BUG FIX: žiadny camera.rotation.z — kamera je vždy "hlavou hore"
   skyDome.position.copy(camera.position);
 }
 
@@ -790,6 +897,7 @@ function loop(ts) {
 
   if (gameRunning) {
     updateDrone(dt);
+    updateDroneMesh(ts);
     updateCamera();
     drawMinimap();
     const t = ts * 0.012;
@@ -817,6 +925,7 @@ function startGame() {
   document.getElementById('screen-over').classList.remove('show');
   resetDrone();
   buildCourse();
+  buildDroneMesh();
   gameRunning = true;
 }
 
@@ -824,16 +933,18 @@ function restartGame() {
   document.getElementById('screen-over').classList.remove('show');
   resetDrone();
   buildCourse();
+  buildDroneMesh();
   gameRunning = true;
 }
 
 function resetDrone() {
   Object.assign(drone, { x:0, y:3.5, z:-6, vx:0, vy:0, vz:0,
     yaw:0, visualPitch:0, visualRoll:0, baseSpeed:9, alive:true });
-  Object.assign(camSmooth, { x:0, y:3.5, z:-6, yaw:0 });
+  // Kamera štartuje ZA dronom
+  Object.assign(camSmooth, { x:0, y:6.3, z:-13, yaw:0 });
   score=0; gameTime=0; polesPassed=0; maxDist=0; shakeTimer=0;
-  camera.position.set(0, 3.5, -6);
-  camera.lookAt(0, 3.5, 10);
+  camera.position.set(0, 6.3, -13);
+  camera.lookAt(0, 3.5, 0);
   document.getElementById('warning').className = '';
   document.getElementById('speedlines').style.opacity = 0;
 }
