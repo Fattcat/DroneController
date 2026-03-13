@@ -18,8 +18,14 @@ import os
 import sys
 import time
 import threading
-import serial
-import serial.tools.list_ports
+from typing import Optional  # BUG FIX: 'dict | None' syntax vyžaduje Python 3.10+
+try:
+    import serial
+    import serial.tools.list_ports
+except ImportError:
+    print("\n  ❌  CHYBA: Modul 'pyserial' nie je nainštalovaný!")
+    print("  Spusti:  pip uninstall serial  &&  pip install pyserial\n")
+    sys.exit(1)
 from flask import Flask, send_from_directory
 from flask_socketio import SocketIO
 
@@ -41,37 +47,64 @@ socketio = SocketIO(
 )
 
 # ─── Globálny stav ───────────────────────────────────────────
-latest_ctrl = None
+latest_ctrl: Optional[dict] = None
 arduino_connected = False
 connected_clients = 0
+state_lock = threading.Lock()
+last_known_port: Optional[str] = None   # Posledný úspešný port — pri reconnecte sa skúša ako prvý
 
 
 # ─── Pomocné funkcie ─────────────────────────────────────────
-def find_arduino_port():
-    """Automaticky nájde port Arduino / CH340 / CP210x."""
+
+# CH340 klony majú pevný USB VID:PID = 1A86:7523
+CH340_VID = 0x1A86
+CH340_PID = 0x7523
+
+ARDUINO_KEYWORDS = [
+    "ch340", "ch341", "cp210", "arduino", "usb serial",
+    "uart", "ttyusb", "ttyacm", "usbmodem", "usbserial",
+]
+
+def is_arduino_port(port) -> bool:
+    """Vráti True ak port vyzerá ako Arduino / CH340 klon."""
+    # Primárne: porovnaj VID/PID (spoľahlivé aj bez popisného drivera)
+    if port.vid == CH340_VID and port.pid == CH340_PID:
+        return True
+    # Záložné: hľadaj kľúčové slová v popise / výrobcovi
+    desc = ((port.description or "") + (port.manufacturer or "")).lower()
+    return any(kw in desc for kw in ARDUINO_KEYWORDS)
+
+def find_arduino_port() -> Optional[str]:
+    """
+    Nájde port Arduino/CH340.
+    - Nikdy nespadne na náhodný port (napr. COM1 = systémový).
+    - Pri reconnecte skúsi posledný známy port ako prvý.
+    - Ak nenájde nič s Arduino signaturou, vráti None a čaká.
+    """
     if PORT_HINT:
         return PORT_HINT
 
     ports = serial.tools.list_ports.comports()
-    ARDUINO_KEYWORDS = [
-        "Arduino", "CH340", "CH341", "CP210", "USB Serial",
-        "UART", "ttyUSB", "ttyACM", "usbmodem", "usbserial",
-    ]
+
+    # 1. Skús posledný known port ak ešte existuje v zozname
+    if last_known_port:
+        for port in ports:
+            if port.device == last_known_port and is_arduino_port(port):
+                print(f"  🔄  Reconnect na posledný port: {port.device}")
+                return port.device
+
+    # 2. Hľadaj akýkoľvek Arduino/CH340 port
     for port in ports:
-        desc = (port.description or "") + (port.manufacturer or "")
-        if any(kw.lower() in desc.lower() for kw in ARDUINO_KEYWORDS):
+        if is_arduino_port(port):
+            desc = (port.description or "").strip()
             print(f"  ✅  Nájdený Arduino port: {port.device}  [{desc}]")
             return port.device
 
-    # Fallback: prvý dostupný port
-    if ports:
-        print(f"  ⚠️   Arduino nenájdený - skúšam prvý port: {ports[0].device}")
-        return ports[0].device
-
+    # 3. ŽIADNY fallback na prvý port — COM1 atď. nie sú Arduino
     return None
 
 
-def parse_line(line: str) -> dict | None:
+def parse_line(line: str) -> Optional[dict]:   # BUG FIX: bolo `dict | None`
     """Parsuje riadok formátu  LX:512,LY:512,..."""
     try:
         parts = line.strip().split(",")
@@ -90,57 +123,93 @@ def parse_line(line: str) -> dict | None:
 
 # ─── Sériový vlákno ──────────────────────────────────────────
 def serial_thread():
-    global latest_ctrl, arduino_connected
+    global latest_ctrl, arduino_connected, connected_clients, last_known_port
     min_interval = 1.0 / SEND_RATE_HZ
-    last_emit = 0
+    last_emit    = 0
 
     while True:
         port = find_arduino_port()
         if not port:
-            print("  🔴  Arduino nenájdený. Retry o 5 sekúnd... (hra funguje len s klávesnicou)")
-            time.sleep(5)
+            print("  🔴  Arduino (CH340) nenájdené. Retry o 3 s...  (hra funguje len s klávesnicou)")
+            time.sleep(3)
             continue
 
         try:
-            ser = serial.Serial(port, BAUD_RATE, timeout=1.0)
-            time.sleep(2.0)  # Arduino reset čas
+            ser = serial.Serial(port, BAUD_RATE, timeout=2.0)
+            time.sleep(2.0)          # Čakaj na reset Arduina po otvorení portu
             ser.reset_input_buffer()
-            arduino_connected = True
-            socketio.emit("arduino_status", {"connected": True})
-            print(f"  🟢  Arduino pripojený na {port}")
 
+            # ── Overenie: počkaj na DRONE_CTRL_READY (max 5 s) ──────
+            # Ak to nepríde, port je síce otvorený ale nejde o náš controller.
+            print(f"  ⏳  Čakám na handshake z {port}...")
+            deadline = time.monotonic() + 5.0
+            confirmed = False
+            while time.monotonic() < deadline:
+                raw = ser.readline()
+                if not raw:
+                    continue
+                line = raw.decode("utf-8", errors="ignore")
+                if "DRONE_CTRL_READY" in line:
+                    confirmed = True
+                    break
+
+            if not confirmed:
+                print(f"  ⚠️  {port}: žiadny handshake — nie je to náš controller, preskakujem.")
+                ser.close()
+                time.sleep(2)
+                continue
+
+            # ── Port potvrdený — ulož ho pre prípadný reconnect ──────
+            with state_lock:
+                last_known_port   = port
+                arduino_connected = True
+            socketio.emit("arduino_status", {"connected": True})
+            print(f"  🟢  Arduino pripojené na {port}")
+            print(f"  🎮  Controller inicializovaný!")
+
+            # ── Hlavná slučka čítania ────────────────────────────────
+            consecutive_empty = 0
             while True:
                 try:
                     raw = ser.readline()
                     if not raw:
+                        consecutive_empty += 1
+                        # Ak dlho nič nechodí, Arduino asi vypadlo
+                        if consecutive_empty > 30:
+                            print(f"  ⚠️  {port}: timeout — Arduino pravdepodobne odpojené.")
+                            break
                         continue
-                    line = raw.decode("utf-8", errors="ignore")
+                    consecutive_empty = 0
 
+                    line = raw.decode("utf-8", errors="ignore")
                     if "DRONE_CTRL_READY" in line:
-                        print("  🎮  Controller inicializovaný!")
-                        continue
+                        continue   # Reboot Arduina za behu — normálne pokračuj
 
                     data = parse_line(line)
                     if data is None:
                         continue
 
-                    latest_ctrl = data
+                    with state_lock:
+                        latest_ctrl = data
 
-                    # Throttle: emituj max. SEND_RATE_HZ krát za sekundu
                     now = time.monotonic()
-                    if now - last_emit >= min_interval and connected_clients > 0:
+                    with state_lock:
+                        clients = connected_clients
+                    if now - last_emit >= min_interval and clients > 0:
                         socketio.emit("controller", data)
                         last_emit = now
 
                 except serial.SerialException as e:
-                    print(f"  ⚠️   Serial chyba: {e}")
+                    print(f"  ⚠️  Serial chyba: {e}")
                     break
 
         except serial.SerialException as e:
             print(f"  🔴  Nemôžem otvoriť {port}: {e}")
 
-        arduino_connected = False
+        with state_lock:
+            arduino_connected = False
         socketio.emit("arduino_status", {"connected": False})
+        print(f"  🔴  Odpojené. Hľadám Arduino znova...")
         time.sleep(3)
 
 
@@ -159,27 +228,33 @@ def index():
 
 @app.route("/status")
 def status():
-    return {
-        "arduino": arduino_connected,
-        "clients": connected_clients,
-        "last_data": latest_ctrl,
-    }
+    with state_lock:
+        return {
+            "arduino": arduino_connected,
+            "clients": connected_clients,
+            "last_data": latest_ctrl,
+        }
 
 
 # ─── SocketIO udalosti ────────────────────────────────────────
 @socketio.on("connect")
 def on_connect():
     global connected_clients
-    connected_clients += 1
-    print(f"  🌐  Prehliadač pripojený  (celkom: {connected_clients})")
-    socketio.emit("arduino_status", {"connected": arduino_connected})
+    with state_lock:
+        connected_clients += 1
+        clients = connected_clients
+        is_connected = arduino_connected
+    print(f"  🌐  Prehliadač pripojený  (celkom: {clients})")
+    socketio.emit("arduino_status", {"connected": is_connected})
 
 
 @socketio.on("disconnect")
 def on_disconnect():
     global connected_clients
-    connected_clients = max(0, connected_clients - 1)
-    print(f"  🌐  Prehliadač odpojený  (celkom: {connected_clients})")
+    with state_lock:
+        connected_clients = max(0, connected_clients - 1)
+        clients = connected_clients
+    print(f"  🌐  Prehliadač odpojený  (celkom: {clients})")
 
 
 # ─── Hlavný vstup ─────────────────────────────────────────────
