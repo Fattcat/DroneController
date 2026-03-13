@@ -422,7 +422,7 @@ for (let i=0; i<24; i++) {
 // ── Course: Poles ────────────────────────────────────────────
 const POLES       = [];
 const NUM_POLES   = 45;
-const CORR_HALF_W = 22; // half-corridor width (±X)
+const CORR_HALF_W = 22;
 
 function buildCourse() {
   POLES.forEach(p => {
@@ -431,19 +431,15 @@ function buildCourse() {
   });
   POLES.length = 0;
 
-  // Seeded random-ish layout — guarantees some navigable gaps
   for (let i = 0; i < NUM_POLES; i++) {
-    // Distribute along course, with clusters
     const baseZ  = 18 + (i / NUM_POLES) * (COURSE_LEN - 30);
     const z      = baseZ + (Math.random() - 0.5) * 8;
-    // Offset X: bias toward edges, leaving center-ish gaps
     const side   = Math.random() > 0.5 ? 1 : -1;
     const xBias  = 4 + Math.random() * (CORR_HALF_W - 4);
     const x      = side * xBias;
-    const height = 7 + Math.random() * 16;   // 7–23 m tall
-    const radius = 0.55 + Math.random() * 0.9; // 0.55–1.45
+    const height = 7 + Math.random() * 16;
+    const radius = 0.55 + Math.random() * 0.9;
 
-    // Visual pole (cylinder)
     const hue      = Math.random();
     const bodyMat  = new THREE.MeshLambertMaterial({ color: new THREE.Color().setHSL(hue, 0.6, 0.35) });
     const bodyMesh = new THREE.Mesh(
@@ -454,7 +450,6 @@ function buildCourse() {
     bodyMesh.castShadow = true;
     scene.add(bodyMesh);
 
-    // Glowing top sphere
     const capMat  = new THREE.MeshLambertMaterial({ color: new THREE.Color().setHSL(hue, 1.0, 0.65), emissive: new THREE.Color().setHSL(hue, 1.0, 0.3) });
     const capMesh = new THREE.Mesh(new THREE.SphereGeometry(radius*1.6, 8, 8), capMat);
     capMesh.position.set(x, height + radius*1.0, z);
@@ -463,9 +458,7 @@ function buildCourse() {
     POLES.push({ x, z, height, colRadius: radius + 0.9, bodyMesh, capMesh, passed:false });
   }
 
-  // Start arch (green)
   buildArch(  0,  0x00ff88, 'START');
-  // Finish arch (gold)
   buildArch(COURSE_LEN, 0xffd700, 'CIEĽ');
 }
 
@@ -513,27 +506,47 @@ function readKeyboard() {
   ctrl.speedUp    = !!keys['ArrowUp'];
   ctrl.speedDown  = !!keys['ArrowDown'];
   ctrl.brake      = !!keys['KeyX'];
-  ctrl.boost      = false; // keyboard has no boost (use B3 on controller)
+  ctrl.boost      = false;
 }
 
 // ── WebSocket (Arduino) ───────────────────────────────────────
 let arduinoOn = false;
+
 function connectArduino() {
   try {
     const socket = io('http://localhost:5000', { timeout:3000, reconnectionDelay:2000 });
+
     socket.on('connect', () => {
-      arduinoOn = true;
       const el = document.getElementById('conn');
       el.textContent = '⬤ ARDUINO OK';
       el.className = 'ok';
     });
+
     socket.on('disconnect', () => {
       arduinoOn = false;
       document.getElementById('conn').textContent = '⬤ BEZ ARDUINO';
       document.getElementById('conn').className = '';
     });
+
+    // BUG FIX: 'arduino_status' event nastavuje arduinoOn príznak.
+    // Predtým sa arduinoOn nastavoval len pri socket connect/disconnect,
+    // čo znamenalo že sa nikdy nestal true — klávesnica vždy prepísala Arduino vstup.
+    socket.on('arduino_status', d => {
+      arduinoOn = d.connected;
+      const el = document.getElementById('conn');
+      if (arduinoOn) {
+        el.textContent = '⬤ ARDUINO OK';
+        el.className = 'ok';
+      } else {
+        el.textContent = '⬤ BEZ ARDUINO';
+        el.className = '';
+      }
+    });
+
     socket.on('controller', d => {
       if (!gameRunning) return;
+      // BUG FIX: ctrl sa nastavuje len keď Arduino skutočne posiela dáta.
+      // arduinoOn sa nastavuje cez arduino_status event (vyššie).
       ctrl.yaw      = -mapJoy(d.LX);
       ctrl.throttle = -mapJoy(d.LY);
       ctrl.roll     =  mapJoy(d.RX);
@@ -543,10 +556,13 @@ function connectArduino() {
       ctrl.boost      = d.B3 === 1;
       ctrl.brake      = d.B4 === 1;
     });
+
   } catch(_) {}
 }
 
-function mapJoy(v, center=512, dead=45, max=510) {
+// BUG FIX: dead zone sa neaplikuje v prehliadači — Arduino ju už aplikuje samo.
+// Táto funkcia je ponechaná ako záložný filter pre prípad šumu.
+function mapJoy(v, center=512, dead=20, max=510) {
   const d = v - center;
   if (Math.abs(d) < dead) return 0;
   return Math.max(-1, Math.min(1, (d - Math.sign(d)*dead) / (max - dead)));
@@ -555,10 +571,10 @@ function mapJoy(v, center=512, dead=45, max=510) {
 // ── Physics constants ─────────────────────────────────────────
 const GRAVITY    = -9.8;
 const LIFT_MAX   =  13;
-const YAW_RATE   =  2.0;  // rad/s
-const DRAG_H     =  0.87; // horizontal drag per frame (@ 60fps)
-const DRAG_V     =  0.89; // vertical drag
-const DRONE_R    =  0.65; // collision sphere radius
+const YAW_RATE   =  2.0;
+const DRAG_H     =  0.87;
+const DRAG_V     =  0.89;
+const DRONE_R    =  0.65;
 const MAX_ALT    =  45;
 const BOOST_MUL  =  1.65;
 
@@ -572,8 +588,12 @@ let maxDist      = 0;
 function updateDrone(dt) {
   if (!drone.alive || !gameRunning) return;
 
-  // Keyboard only if no arduino
-  readKeyboard();
+  // BUG FIX: readKeyboard() sa volalo každý frame bez ohľadu na to,
+  // či je Arduino pripojené — čím sa prepísali všetky Arduino ctrl hodnoty.
+  // Teraz sa klávesnica číta LEN keď Arduino nie je pripojené.
+  if (!arduinoOn) {
+    readKeyboard();
+  }
 
   // Speed adjustment
   if (ctrl.speedUp)   drone.baseSpeed = Math.min(20, drone.baseSpeed + 6*dt);
@@ -582,40 +602,33 @@ function updateDrone(dt) {
     drone.vx *= 0.85; drone.vz *= 0.85;
   }
 
-  // Effective speed (boost)
   const spd = drone.baseSpeed * (ctrl.boost ? BOOST_MUL : 1.0);
 
-  // Yaw
   drone.yaw += ctrl.yaw * YAW_RATE * dt;
 
   const sinY = Math.sin(drone.yaw);
   const cosY = Math.cos(drone.yaw);
 
-  // Desired horizontal velocity from pitch+roll
   const fwdX = sinY * ctrl.pitch,  fwdZ = cosY * ctrl.pitch;
   const strX = cosY * ctrl.roll,   strZ =-sinY * ctrl.roll;
   const desVX = (fwdX + strX) * spd;
   const desVZ = (fwdZ + strZ) * spd;
 
-  // Minimal auto-creep forward (so player must maintain pitch to go fast)
   const creepX = sinY * 0.5, creepZ = cosY * 0.5;
 
   const kDrag = 1 - Math.pow(DRAG_H, dt*60);
   drone.vx += (desVX + creepX - drone.vx) * kDrag;
   drone.vz += (desVZ + creepZ - drone.vz) * kDrag;
 
-  // Vertical
   const vertAcc = ctrl.throttle * LIFT_MAX + GRAVITY * 0.75;
   drone.vy += vertAcc * dt;
   drone.vy *= Math.pow(DRAG_V, dt*60);
   drone.vy  = Math.max(-18, Math.min(18, drone.vy));
 
-  // Integrate position
   drone.x += drone.vx * dt;
   drone.y += drone.vy * dt;
   drone.z += drone.vz * dt;
 
-  // Altitude clamps
   if (drone.y < 0.4) {
     drone.y  = 0.4;
     if (drone.vy < -4) { crash("💥 Dotkol si sa zeme!"); return; }
@@ -623,16 +636,13 @@ function updateDrone(dt) {
   }
   if (drone.y > MAX_ALT) { drone.y = MAX_ALT; drone.vy = Math.min(0, drone.vy); }
 
-  // Visual tilt
   drone.visualPitch = THREE.MathUtils.lerp(drone.visualPitch, ctrl.pitch * 0.32, 0.18);
   drone.visualRoll  = THREE.MathUtils.lerp(drone.visualRoll,  -ctrl.roll  * 0.28 - ctrl.yaw * 0.12, 0.18);
 
-  // Score: distance
   const dist = Math.max(0, drone.z);
   if (dist > maxDist) maxDist = dist;
   gameTime += dt;
 
-  // Pole collision & pass check
   let warn = false;
   for (const p of POLES) {
     const dx = drone.x - p.x, dz = drone.z - p.z;
@@ -643,21 +653,18 @@ function updateDrone(dt) {
     if (!p.passed && drone.z > p.z + 2) {
       p.passed = true;
       polesPassed++;
-      score += 15;  // bonus per pole avoided
+      score += 15;
     }
     if (d2 < p.colRadius + 4 && drone.y < p.height + 3) warn = true;
   }
 
   document.getElementById('warning').className = warn ? 'show' : '';
 
-  // Speed lines at high speed
   const horizSpd = Math.sqrt(drone.vx**2 + drone.vz**2);
   document.getElementById('speedlines').style.opacity = Math.max(0, (horizSpd - 12) / 8) * 0.6;
 
-  // Distance score
   score = polesPassed * 15 + Math.floor(maxDist * 0.4) + Math.floor(gameTime * 1.5);
 
-  // Finish line
   if (drone.z > COURSE_LEN + 5) { winGame(); return; }
 
   updateHUD(horizSpd);
@@ -709,7 +716,6 @@ function drawMinimap() {
   mmCtx.fillStyle = 'rgba(0,10,0,0.8)';
   mmCtx.fillRect(0, 0, MM_W, MM_H);
 
-  // Draw poles
   POLES.forEach(p => {
     const px = (p.x + CORR_HALF_W) * mmScaleX;
     const pz = p.z * mmScaleZ;
@@ -719,7 +725,6 @@ function drawMinimap() {
     mmCtx.fill();
   });
 
-  // Draw drone
   const dpx = (drone.x + CORR_HALF_W) * mmScaleX;
   const dpz = drone.z * mmScaleZ;
   mmCtx.beginPath();
@@ -730,7 +735,6 @@ function drawMinimap() {
   mmCtx.fill();
   mmCtx.shadowBlur = 0;
 
-  // Heading line
   mmCtx.beginPath();
   mmCtx.moveTo(dpx, dpz);
   mmCtx.lineTo(dpx + Math.sin(drone.yaw)*8, dpz + Math.cos(drone.yaw)*8);
@@ -788,20 +792,17 @@ function loop(ts) {
     updateDrone(dt);
     updateCamera();
     drawMinimap();
-    // Animate prop corners
     const t = ts * 0.012;
     ['p-tl','p-tr','p-bl','p-br'].forEach((id, i) => {
       document.getElementById(id).style.transform =
         (id==='p-tr'?'scaleX(-1) ':id==='p-bl'?'scaleY(-1) ':id==='p-br'?'scale(-1,-1) ':'') +
         `rotate(${t * (i%2===0 ? 1:-1) * 360}deg)`;
     });
-    // Shake on crash
     if (shakeTimer > 0) {
       shakeTimer -= dt;
       camera.position.x += (Math.random()-0.5)*0.4;
       camera.position.y += (Math.random()-0.5)*0.4;
     }
-    // Animate cap spheres pulsing
     const pulse = 0.9 + 0.1*Math.sin(ts*0.004);
     POLES.forEach(p => {
       if (p.capMesh) p.capMesh.scale.setScalar(pulse);
